@@ -67,6 +67,155 @@ namespace PointMatcher_ros
 		}
 		featLabels.push_back(Label("pad", 1));
 		assert(isFeature.size() == rosMsg.fields.size());
+
+		// create cloud
+		const unsigned pointCount(rosMsg.width * rosMsg.height);
+		DataPoints cloud(featLabels, descLabels, pointCount);
+		cloud.getFeatureViewByName("pad").setConstant(1);
+		
+		// fill cloud
+		// TODO: support big endian, pass through endian-swapping method just after the *reinterpret_cast
+		typedef sensor_msgs::PointField PF;
+		size_t fieldId = 0;
+		for(auto it(rosMsg.fields.begin()); it != rosMsg.fields.end(); ++it, ++fieldId)
+		{
+			if (it->name == "rgb" || it->name == "rgba")
+			{
+				// special case for colors
+				if (((it->datatype != PF::UINT32) && (it->datatype != PF::INT32) && (it->datatype != PF::FLOAT32)) || (it->count != 1))
+					throw runtime_error(
+						(boost::format("Colors in a point cloud must be a single element of size 32 bits, found %1% elements of type %2%") % it->count % unsigned(it->datatype)).str()
+					);
+				View view(cloud.getDescriptorViewByName("color"));
+				int ptId(0);
+				for (size_t y(0); y < rosMsg.height; ++y)
+				{
+					const uint8_t* dataPtr(&rosMsg.data[0] + rosMsg.row_step*y);
+					for (size_t x(0); x < rosMsg.width; ++x)
+					{
+						const uint32_t rgba(*reinterpret_cast<const uint32_t*>(dataPtr + it->offset));
+						const T colorA(T((rgba >> 24) & 0xff) / 255.);
+						const T colorR(T((rgba >> 16) & 0xff) / 255.);
+						const T colorG(T((rgba >> 8) & 0xff) / 255.);
+						const T colorB(T((rgba >> 0) & 0xff) / 255.);
+						view(0, ptId) = colorR;
+						view(1, ptId) = colorG;
+						view(2, ptId) = colorB;
+						if (view.rows() > 3)
+							view(3, ptId) = colorA;
+						dataPtr += rosMsg.point_step;
+						ptId += 1;
+					}
+				}
+			}
+			else
+			{
+				// get view for editing data
+				View view(
+					 (it->name == "normal_x") ? cloud.getDescriptorRowViewByName("normals", 0) :
+					((it->name == "normal_y") ? cloud.getDescriptorRowViewByName("normals", 1) :
+					((it->name == "normal_z") ? cloud.getDescriptorRowViewByName("normals", 2) :
+					((isFeature[fieldId]) ? cloud.getFeatureViewByName(it->name) :
+					cloud.getDescriptorViewByName(it->name))))
+				);
+				// use view to read data
+				int ptId(0);
+				const size_t count(std::max<size_t>(it->count, 1));
+				for (size_t y(0); y < rosMsg.height; ++y)
+				{
+					const uint8_t* dataPtr(&rosMsg.data[0] + rosMsg.row_step*y);
+					for (size_t x(0); x < rosMsg.width; ++x)
+					{
+						const uint8_t* fPtr(dataPtr + it->offset);
+						for (unsigned dim(0); dim < count; ++dim)
+						{
+							switch (it->datatype)
+							{
+								case PF::INT8: view(dim, ptId) = T(*reinterpret_cast<const int8_t*>(fPtr)); fPtr += 1; break;
+								case PF::UINT8: view(dim, ptId) = T(*reinterpret_cast<const uint8_t*>(fPtr)); fPtr += 1; break;
+								case PF::INT16: view(dim, ptId) = T(*reinterpret_cast<const int16_t*>(fPtr)); fPtr += 2; break;
+								case PF::UINT16: view(dim, ptId) = T(*reinterpret_cast<const uint16_t*>(fPtr)); fPtr += 2; break;
+								case PF::INT32: view(dim, ptId) = T(*reinterpret_cast<const int32_t*>(fPtr)); fPtr += 4; break;
+								case PF::UINT32: view(dim, ptId) = T(*reinterpret_cast<const uint32_t*>(fPtr)); fPtr += 4; break;
+								case PF::FLOAT32: view(dim, ptId) = T(*reinterpret_cast<const float*>(fPtr)); fPtr += 4; break;
+								case PF::FLOAT64: view(dim, ptId) = T(*reinterpret_cast<const double*>(fPtr)); fPtr += 8; break;
+								default: abort();
+							}
+						}
+						dataPtr += rosMsg.point_step;
+						ptId += 1;
+					}
+				}
+			}
+		}
+
+		shared_ptr<typename PM::DataPointsFilter> filter(PM::get().DataPointsFilterRegistrar.create("RemoveNaNDataPointsFilter"));
+		return filter->filter(cloud);
+	}
+	
+	template<typename T>
+	typename PointMatcher<T>::DataPoints rosMsgToPointMatcherCloud(const sensor_msgs::PointCloud2& rosMsg, const std::vector<int>& semantic_id)
+	{
+		typedef PointMatcher<T> PM;
+		typedef typename PM::DataPoints DataPoints;
+		typedef typename DataPoints::Label Label;
+		typedef typename DataPoints::Labels Labels;
+		typedef typename DataPoints::View View;
+		
+		if (rosMsg.fields.empty())
+			return DataPoints();
+		
+		// fill labels
+		// conversions of descriptor fields from pcl
+		// see http://www.ros.org/wiki/pcl/Overview
+		Labels featLabels;
+		Labels descLabels;
+		vector<bool> isFeature;
+		for(auto it(rosMsg.fields.begin()); it != rosMsg.fields.end(); ++it)
+		{
+			const string name(it->name);
+			const size_t count(std::max<size_t>(it->count, 1));
+			if (name == "x" || name == "y" || name == "z")
+			{
+				featLabels.push_back(Label(name, count));
+				isFeature.push_back(true);
+			}
+			else if (name == "rgb" || name == "rgba")
+			{
+				descLabels.push_back(Label("color", (name == "rgba") ? 4 : 3));
+				isFeature.push_back(false);
+			}
+			else if ((it+1) != rosMsg.fields.end() && it->name == "normal_x" && (it+1)->name == "normal_y")
+			{
+				if ((it+2) != rosMsg.fields.end() && (it+2)->name == "normal_z")
+				{
+					descLabels.push_back(Label("normals", 3));
+					it += 2;
+					isFeature.push_back(false);
+					isFeature.push_back(false);
+				}
+				else
+				{
+					descLabels.push_back(Label("normals", 2));
+					it += 1;
+					isFeature.push_back(false);
+				}
+				isFeature.push_back(false);
+			}
+			else 
+			{
+				descLabels.push_back(Label(name, count));
+				isFeature.push_back(false);
+			}
+		}
+		featLabels.push_back(Label("pad", 1));
+		assert(isFeature.size() == rosMsg.fields.size());
+
+		for(auto it(rosMsg.fields.begin()); it != rosMsg.fields.end(); ++it)
+		{
+			descLabels.push_back(Label("semantic", 1));
+			isFeature.push_back(false);
+		}
 		
 		// create cloud
 		const unsigned pointCount(rosMsg.width * rosMsg.height);
@@ -149,13 +298,35 @@ namespace PointMatcher_ros
 			}
 		}
 
-		
+		// for the semantic properties
+		for(auto it(rosMsg.fields.begin()); it != rosMsg.fields.end(); ++it)
+		{
+			View view(cloud.getDescriptorViewByName("semantic"));
+			int ptId(0);
+			for (size_t y(0); y < rosMsg.height; ++y)
+			{
+				for (size_t x(0); x < rosMsg.width; ++x)
+				{
+					// car and ground id switching
+					if (semantic_id[ptId] == 1) 
+						view(0, ptId) = 3;
+					else if (semantic_id[ptId] == 3)
+						view(0, ptId) = 1;
+					else
+						view(0, ptId) = semantic_id[ptId];
+					ptId += 1;
+				}
+			}
+		}
+
 		shared_ptr<typename PM::DataPointsFilter> filter(PM::get().DataPointsFilterRegistrar.create("RemoveNaNDataPointsFilter"));
 		return filter->filter(cloud);
 	}
-	
+
 	template
 	PointMatcher<float>::DataPoints rosMsgToPointMatcherCloud<float>(const sensor_msgs::PointCloud2& rosMsg);
+	template
+	PointMatcher<float>::DataPoints rosMsgToPointMatcherCloud<float>(const sensor_msgs::PointCloud2& rosMsg, const std::vector<int>& semantic_id);
 	template
 	PointMatcher<double>::DataPoints rosMsgToPointMatcherCloud<double>(const sensor_msgs::PointCloud2& rosMsg);
 	
