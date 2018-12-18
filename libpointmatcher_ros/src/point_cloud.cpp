@@ -309,11 +309,11 @@ namespace PointMatcher_ros
 				{
 					// car and ground id switching
 					if (semantic_id[ptId] == 1) 
-						view(0, ptId) = 3;
+						view(0, ptId) = 3*1000;
 					else if (semantic_id[ptId] == 3)
-						view(0, ptId) = 1;
+						view(0, ptId) = 1*1000;
 					else
-						view(0, ptId) = semantic_id[ptId];
+						view(0, ptId) = semantic_id[ptId]*1000;
 					ptId += 1;
 				}
 			}
@@ -628,7 +628,7 @@ namespace PointMatcher_ros
 				rosCloud.fields.push_back(pointField);
 				offset += 4;
 			}
-			else
+			else 
 			{
 				pointField.datatype = dataType;
 				pointField.name = it->text;
