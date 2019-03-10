@@ -20,6 +20,9 @@ namespace PointMatcher_ros
 	typename PointMatcher<T>::DataPoints rosMsgToPointMatcherCloud(const sensor_msgs::PointCloud2& rosMsg);
 
 	template<typename T>
+	typename PointMatcher<T>::DataPoints rosMsgToSemanticPointMatcherCloud(const sensor_msgs::PointCloud2& rosMsg);
+
+	template<typename T>
 	typename PointMatcher<T>::DataPoints rosMsgToPointMatcherCloud(const sensor_msgs::PointCloud2& rosMsg, const std::vector<int>& semantic_id);
 	
 	template<typename T>
